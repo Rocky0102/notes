@@ -1,0 +1,108 @@
+go语言分析
+====
+interface接口的底层类型是runtime.eface
+--------------------------------------------------------
+(gdb) ptype gp._panic
+type = struct runtime._panic {
+    void *argp;
+    interface {} arg;
+    struct runtime._panic *link;
+    bool recovered;
+    bool aborted;
+} *
+
+(gdb) ptype gp._panic.arg
+type = struct runtime.eface {
+    runtime._type *_type;
+    void *data;
+}
+
+
+(gdb) f 6
+ #6  0x0000000000474922 in fmt.Printf (format="Twice %v is %v\n", a= []interface {} = {...}, n=140737353854976, err=...) at /opt/limh/src/gosrc/go-go1.8.3/src/fmt/print.go:190
+190		return Fprintf(os.Stdout, format, a...)
+(gdb) info args
+format = "Twice %v is %v\n"
+a =  []interface {} = {{_type = 0x48b7c0, data = 0xc42000e2c0}, {_type = 0x48b7c0, data = 0xc42000e2c8}}
+n = 140737353854976
+err = {tab = 0x0, data = 0x7ffff7fbb000}
+(gdb) p a[0]
+Structure has no component named operator[].
+(gdb) ptype a
+type = struct []interface {} {
+    interface {} *array;
+    int len;
+    int cap;
+}
+(gdb) p a.array[0]
+$1 = {_type = 0x48b7c0, data = 0xc42000e2c0}
+
+
+error的底层类型是runtime.iface
+----
+(gdb) f 6
+ #6  0x0000000000474922 in fmt.Printf (format="Twice %v is %v\n", a= []interface {} = {...}, n=140737353854976, err=...) at /opt/limh/src/gosrc/go-go1.8.3/src/fmt/print.go:190
+190		return Fprintf(os.Stdout, format, a...)
+(gdb) ptype err
+type = struct runtime.iface {
+    runtime.itab *tab;
+    void *data;
+}
+但为什么：
+func Fprintf(w io.Writer, format string, a ...interface{}) (n int, err error) {
+        p := newPrinter()
+        p.doPrintf(format, a)
+        n, err = w.Write(p.buf)
+        p.free()
+        return
+}
+
+(gdb) ptype w
+type = struct runtime.iface {
+    runtime.itab *tab;
+    void *data;
+}
+因为error和io.Writer都是一种接口类型：
+type error interface {
+    Error() string
+}
+
+
+返回值在底层的实现是出参
+----
+ #6  0x0000000000474922 in fmt.Printf (format="Twice %v is %v\n", a= []interface {} = {...}, n=140737353854976, err=...) at /opt/limh/src/gosrc/go-go1.8.3/src/fmt/print.go:190
+对应代码：
+func Printf(format string, a ...interface{}) (n int, err error) {
+        return Fprintf(os.Stdout, format, a...)
+}
+
+
+go编出来的程序默认是静态链接
+----
+ # she file type-switches
+type-switches: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, not stripped
+
+go编出来的静态链接程序没有把libc链接进去，而是自己封装了系统调用
+----
+ # gdb type-switches
+(gdb) catch syscall write
+Catchpoint 1 (syscall 'write' [1])
+(gdb) r
+Starting program: /opt/limh/src/go/type-switches
+Thread 1 "type-switches" hit Catchpoint 1 (call to syscall write), syscall.Syscall () at /opt/limh/src/gosrc/go-go1.8.3/src/syscall/asm_linux_amd64.s:27
+27		CMPQ	AX, $0xfffffffffffff001
+(gdb) bt
+ #0  syscall.Syscall () at /opt/limh/src/gosrc/go-go1.8.3/src/syscall/asm_linux_amd64.s:27
+ #1  0x000000000045c195 in syscall.write (fd=1, p= []uint8 = {...}, n=842351001632, err=...) at /opt/limh/src/gosrc/go-go1.8.3/src/syscall/zsyscall_linux_amd64.go:1064
+ #2  0x000000000045be19 in syscall.Write (fd=1, p= []uint8 = {...}, n=12, err=...) at /opt/limh/src/gosrc/go-go1.8.3/src/syscall/syscall_unix.go:181
+ #3  0x000000000045d7fc in os.(*File).write (f=0xc42000c018, b= []uint8 = {...}, n=16, err=...) at /opt/limh/src/gosrc/go-go1.8.3/src/os/file_unix.go:186
+ #4  0x000000000045ceac in os.(*File).Write (f=0xc42000c018, b= []uint8 = {...}, n=2, err=...) at /opt/limh/src/gosrc/go-go1.8.3/src/os/file.go:142
+ #5  0x0000000000474849 in fmt.Fprintf (w=..., format="Twice %v is %v\n", a= []interface {} = {...}, n=842350518984, err=...) at /opt/limh/src/gosrc/go-go1.8.3/src/fmt/print.go:182
+ #6  0x0000000000474922 in fmt.Printf (format="Twice %v is %v\n", a= []interface {} = {...}, n=140737353854976, err=...) at /opt/limh/src/gosrc/go-go1.8.3/src/fmt/print.go:190
+ #7  0x000000000047d478 in main.do (i=...) at /opt/limh/src/go/type-switches.go:8
+ #8  0x000000000047d5fc in main.main () at /opt/limh/src/go/type-switches.go:17
+可以看到go编出来的程序没有
+
+如何做类型反射
+----
+既然有interface{}这样的接口类型，并且使用时只要实现了这个接口定义的函数就能正常运行，且在没有实现相关接口时没有空指针之类的不可控错误，那么说明go有能力做动态类型检测，应该可以做类型反射。
